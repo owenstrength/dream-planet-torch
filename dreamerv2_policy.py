@@ -46,7 +46,7 @@ class DreamerPolicy:
                 s_t = self.rssm.state_prior(h_t, sample=True)
                 rwds += self.rssm.pred_reward(h_t, s_t)
             _, k = torch.topk(rwds, self.K, dim=0, largest=True, sorted=False)
-        self.a = actions[0:1]
+        self.a = actions[k].mean(dim=0, keepdim=True)  # Average of top K actions
 
     def poll(self, observation, explore=False):
         with torch.no_grad():
