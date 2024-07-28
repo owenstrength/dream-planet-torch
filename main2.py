@@ -128,7 +128,7 @@ def main():
     
     for i in trange(100, desc='Epoch', leave=False):
         metrics = {}
-        for _ in trange(4, desc='Iter ', leave=False):
+        for _ in trange(150, desc='Iter ', leave=False):
             train_metrics = train(mem, rssm_model.train(), actor, critic, optimizer_rssm, optimizer_actor, optimizer_critic, device)
             for k, v in flatten_dict(train_metrics).items():
                 if k not in metrics.keys():
