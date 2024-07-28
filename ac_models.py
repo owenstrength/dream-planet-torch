@@ -12,7 +12,7 @@ class Actor(nn.Module):
     def forward(self, state):
         x = F.relu(self.fc1(state))
         x = F.relu(self.fc2(x))
-        return torch.tanh(self.fc3(x))  # Action values typically range between -1 and 1
+        return 2 * torch.tanh(self.fc3(x))  # Action values typically range between -1 and 1, scaling to -2 and 2
 
 class Critic(nn.Module):
     def __init__(self, state_dim, action_dim):
