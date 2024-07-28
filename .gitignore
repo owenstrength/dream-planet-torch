@@ -1,0 +1,11 @@
+*.pyc
+*/__pycache__
+results/*
+*.png
+*.pth
+*.gv
+*.html
+stm*
+.vscode
+
+results*
