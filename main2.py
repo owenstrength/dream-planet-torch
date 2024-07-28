@@ -123,7 +123,7 @@ def main():
     )
     mem = Memory(100)
     mem.append(rollout_gen.rollout_n(1, random_policy=True))
-    res_dir = 'results/'
+    res_dir = 'results_3/'
     summary = TensorBoardMetrics(f'{res_dir}/')
     
     for i in trange(100, desc='Epoch', leave=False):
