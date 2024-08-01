@@ -9,3 +9,5 @@ stm*
 .vscode
 
 results*
+
+runs/
