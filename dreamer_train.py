@@ -97,8 +97,8 @@ class DreamerV2:
         self.target_critic.load_state_dict(self.critic.state_dict())
 
         self.world_model_optimizer = torch.optim.Adam(self.world_model.parameters(), lr=1e-3)
-        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-4)
-        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=1e-4)
+        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-6)
+        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=1e-6)
 
         self.replay_buffer = ReplayBuffer(100000)
         self.batch_size = 64
