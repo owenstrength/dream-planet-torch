@@ -51,16 +51,15 @@ class Actor(nn.Module):
         x = F.relu(self.fc2(x))
         mean = self.fc_mean(x)
         logstd = self.fc_logstd(x)
+        logstd = torch.clamp(logstd, -20, 2)
         return mean, logstd
 
     def sample(self, state):
         mean, logstd = self(state)
-        logstd = torch.clamp(logstd, -100, 100)
-        std = torch.exp(logstd)
+        std = torch.exp(logstd) + 1e-6
         normal = td.Normal(mean, std)
         action = normal.rsample()
         log_prob = normal.log_prob(action).sum(axis=-1)
-        log_prob = torch.clamp(log_prob, -100, 100)
         return action, log_prob
 
 class Critic(nn.Module):
@@ -188,7 +187,6 @@ class DreamerV2:
         lambda_returns = self.compute_lambda_returns(imagined_rewards, values)
         
         advantages = lambda_returns - values.detach()
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)  # Normalize advantages
         
         
         # Check for NaN or Inf values
