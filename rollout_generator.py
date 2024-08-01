@@ -43,7 +43,7 @@ class RolloutGenerator:
             if random_policy:
                 act = self.env.sample_random_action()
             else:
-                act = self.policy.poll(obs.to(self.device), explore).flatten()
+                act = (self.policy.poll(obs.to(self.device), explore).flatten() * 7).clamp_(-2, 2)
             nobs, reward, terminal, _ = self.env.step(act)
             eps.append(obs, act, reward, terminal)
             obs = nobs
@@ -87,7 +87,7 @@ class RolloutGenerator:
         eps_reward = 0
         for _ in trange(self.max_episode_steps, desc=des, leave=False):
             with torch.no_grad():
-                act = self.policy.poll(obs.to(self.device)).flatten()
+                act = (self.policy.poll(obs.to(self.device)).flatten() * 7).clamp_(-2, 2)
                 dec = self.policy.rssm.decoder(
                     self.policy.h,
                     self.policy.s
