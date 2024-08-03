@@ -1,91 +1,18 @@
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-import torch.distributions as td
 import gym
 import numpy as np
-from collections import deque
 import random
 from torch.utils.tensorboard import SummaryWriter
+
+
+from world_model import WorldModel
+from actor import Actor
+from critic import Critic
+from replay_buffer import ReplayBuffer
+
 torch.autograd.set_detect_anomaly(True)
 
-class RSSM(nn.Module):
-    def __init__(self, state_dim, action_dim, rnn_hidden_dim):
-        super().__init__()
-        self.state_dim = state_dim
-        self.action_dim = action_dim
-        self.rnn_hidden_dim = rnn_hidden_dim
-
-        self.encoder = nn.Linear(state_dim + action_dim, rnn_hidden_dim)
-        self.rnn = nn.GRUCell(rnn_hidden_dim, rnn_hidden_dim)
-        self.decoder = nn.Linear(rnn_hidden_dim, state_dim)
-
-    def forward(self, state, action, hidden):
-        x = torch.cat([state, action], dim=-1)
-        x = F.relu(self.encoder(x))
-        hidden = self.rnn(x, hidden)
-        state_pred = self.decoder(hidden)
-        return state_pred, hidden
-
-class WorldModel(nn.Module):
-    def __init__(self, state_dim, action_dim, rnn_hidden_dim):
-        super().__init__()
-        self.rssm = RSSM(state_dim, action_dim, rnn_hidden_dim)
-        self.reward_predictor = nn.Linear(state_dim, 1)
-
-    def forward(self, state, action, hidden):
-        state_pred, hidden = self.rssm(state, action, hidden)
-        reward_pred = self.reward_predictor(state_pred)
-        return state_pred, reward_pred, hidden
-
-class Actor(nn.Module):
-    def __init__(self, state_dim, action_dim):
-        super().__init__()
-        self.fc1 = nn.Linear(state_dim, 64)
-        self.fc2 = nn.Linear(64, 64)
-        self.fc_mean = nn.Linear(64, action_dim)
-        self.fc_logstd = nn.Linear(64, action_dim)
-
-    def forward(self, state):
-        x = F.relu(self.fc1(state))
-        x = F.relu(self.fc2(x))
-        mean = self.fc_mean(x)
-        logstd = self.fc_logstd(x)
-        logstd = torch.clamp(logstd, -20, 2)
-        return mean, logstd
-
-    def sample(self, state):
-        mean, logstd = self(state)
-        std = torch.exp(logstd) + 1e-6
-        normal = td.Normal(mean, std)
-        action = normal.rsample()
-        log_prob = normal.log_prob(action).sum(axis=-1)
-        return action, log_prob
-
-class Critic(nn.Module):
-    def __init__(self, state_dim):
-        super().__init__()
-        self.fc1 = nn.Linear(state_dim, 64)
-        self.fc2 = nn.Linear(64, 64)
-        self.fc3 = nn.Linear(64, 1)
-
-    def forward(self, state):
-        x = F.relu(self.fc1(state))
-        x = F.relu(self.fc2(x))
-        return self.fc3(x)
-
-class ReplayBuffer:
-    def __init__(self, capacity):
-        self.buffer = deque(maxlen=capacity)
-
-    def push(self, state, action, reward, next_state, done):
-        self.buffer.append((state, action, reward, next_state, done))
-
-    def sample(self, batch_size):
-        return random.sample(self.buffer, batch_size)
-
-    def __len__(self):
-        return len(self.buffer)
 
 class DreamerV2:
     def __init__(self, state_dim, action_dim, rnn_hidden_dim, device='cpu'):
@@ -97,15 +24,20 @@ class DreamerV2:
         self.target_critic.load_state_dict(self.critic.state_dict())
 
         self.world_model_optimizer = torch.optim.Adam(self.world_model.parameters(), lr=1e-3)
-        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-6)
-        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=1e-6)
+        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-4)
+        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=1e-5)
 
         self.replay_buffer = ReplayBuffer(100000)
+
+        # Hyperparameters
         self.batch_size = 64
         self.gamma = 0.99
-        self.tau = 0.005
-        self.imagine_horizon = 10
-        self.lambda_gae = 0.95
+        self.tau = 0.001
+        self.lambda_value = 0.95
+        self.rho = 0.9
+        self.eta = 0.01
+        self.imagine_horizon = 35
+        self.entropy_coef = 0.01
 
         self.writer = SummaryWriter()
 
@@ -152,61 +84,82 @@ class DreamerV2:
                 torch.cat(actions, dim=0),
                 torch.cat(log_probs, dim=0))
 
-    def compute_lambda_returns(self, rewards, values):
-        lambda_returns = []
+    def compute_lambda_returns(self, rewards, states):
+        # Use target network for value estimation
+        with torch.no_grad():
+            values = self.target_critic(states).squeeze(-1)
+        
+        # Normalize rewards
+        rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
+        
+        lambda_returns = torch.zeros_like(rewards)
         last_lambda_return = values[-1]
 
         for t in reversed(range(len(rewards))):
-            bootstrap = (values[t + 1] if t + 1 < len(values) else values[-1])
-            lambda_returns.append(rewards[t] + self.gamma * (
-                self.lambda_gae * last_lambda_return +
-                (1 - self.lambda_gae) * bootstrap))
-            last_lambda_return = lambda_returns[-1]
+            if t == len(rewards) - 1:
+                lambda_returns[t] = rewards[t] + self.gamma * values[t]
+            else:
+                lambda_returns[t] = rewards[t] + self.gamma * (
+                    (1 - self.lambda_value) * values[t + 1] +
+                    self.lambda_value * last_lambda_return)
+            last_lambda_return = lambda_returns[t]
 
-        lambda_returns = lambda_returns[::-1]
-        return torch.cat(lambda_returns, dim=0)
+        return lambda_returns.view(-1)
 
     def update_critic(self, imagined_states, imagined_rewards):
-        # Compute values and lambda returns
         values = self.critic(imagined_states[:-1]).squeeze(-1)
-        lambda_returns = self.compute_lambda_returns(imagined_rewards, values)
-
-        # Compute critic loss
-        critic_loss = F.mse_loss(values, lambda_returns.detach())
+        
+        lambda_returns = self.compute_lambda_returns(imagined_rewards, imagined_states)
+        
+        critic_loss = 0.5 * F.mse_loss(values[:-1], lambda_returns[:-1].detach())
 
         # Update critic
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
         self.critic_optimizer.step()
+
+        # Soft update target network
+        self.soft_update_target_network()
 
         return critic_loss.item()
     
     def update_actor(self, imagined_states, imagined_rewards, log_probs):
-        values = self.critic(imagined_states[:-1]).squeeze(-1)
-        lambda_returns = self.compute_lambda_returns(imagined_rewards, values)
-        
-        advantages = lambda_returns - values.detach()
-        
-        
-        # Check for NaN or Inf values
-        if torch.isnan(log_probs).any() or torch.isinf(log_probs).any():
-            print("Warning: NaN or Inf detected in log_probs")
-            log_probs = torch.nan_to_num(log_probs, nan=0.0, posinf=1e6, neginf=-1e6)
-        
-        if torch.isnan(advantages).any() or torch.isinf(advantages).any():
-            print("Warning: NaN or Inf detected in advantages")
-            advantages = torch.nan_to_num(advantages, nan=0.0, posinf=1e6, neginf=-1e6)
-        
-        actor_loss = -(log_probs * advantages).mean()
-        
+        # Compute values and lambda returns
+        with torch.no_grad():
+            values = self.critic(imagined_states[:-1]).squeeze(-1)
+            lambda_returns = self.compute_lambda_returns(imagined_rewards, imagined_states[:-1])
 
+        # Compute advantages
+        advantages = lambda_returns - values
+
+        # Normalize advantages
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        # Reinforce term
+        reinforce_loss = -self.rho * (log_probs * advantages.detach()).mean()
+
+        # Dynamics backprop term
+        dynamics_loss = -(1 - self.rho) * lambda_returns.mean()
+
+        # Entropy regularizer
+        entropy = -log_probs.mean()
+        entropy_loss = -self.eta * entropy
+
+        # Combined actor loss
+        actor_loss = reinforce_loss + dynamics_loss + entropy_loss
+
+        # Optimize the actor
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)   
+        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
         self.actor_optimizer.step()
 
-        return actor_loss.item()
+        return actor_loss.item(), entropy.item()
+
+    def soft_update_target_network(self):
+        for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
+            target_param.data.copy_(self.tau * param.data + (1.0 - self.tau) * target_param.data)
 
     def train(self, env, num_episodes, max_steps_per_episode=200):
         for episode in range(num_episodes):
@@ -235,7 +188,7 @@ class DreamerV2:
                     imagined_states, imagined_rewards, actions, log_probs = self.imagine_trajectories(state, hidden)
                     imagined_states = imagined_states.detach()
                     imagined_rewards = imagined_rewards.detach()
-                    actor_loss = self.update_actor(imagined_states, imagined_rewards, log_probs)
+                    actor_loss, entropy = self.update_actor(imagined_states, imagined_rewards, log_probs)
                     critic_loss = self.update_critic(imagined_states, imagined_rewards)
 
                     self.writer.add_scalar('Loss/World_Model', world_model_loss, episode * max_steps_per_episode + step)
@@ -243,6 +196,7 @@ class DreamerV2:
                     self.writer.add_scalar('Loss/Reward_Prediction', reward_loss, episode * max_steps_per_episode + step)
                     self.writer.add_scalar('Loss/Actor', actor_loss, episode * max_steps_per_episode + step)
                     self.writer.add_scalar('Loss/Critic', critic_loss, episode * max_steps_per_episode + step)
+                    self.writer.add_scalar('Entropy', entropy, episode * max_steps_per_episode + step)
 
                 state = next_state
                 total_reward += reward
