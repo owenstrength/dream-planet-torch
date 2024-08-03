@@ -15,8 +15,10 @@ torch.autograd.set_detect_anomaly(True)
 
 
 class DreamerV2:
-    def __init__(self, state_dim, action_dim, rnn_hidden_dim, device='cpu'):
+    def __init__(self, state_dim, action_dim, rnn_hidden_dim, device='cpu', is_continous=True):
         self.device = device
+        self.is_continous = is_continous
+
         self.world_model = WorldModel(state_dim, action_dim, rnn_hidden_dim).to(device)
         self.actor = Actor(state_dim, action_dim).to(device)
         self.critic = Critic(state_dim).to(device)
@@ -90,7 +92,7 @@ class DreamerV2:
             values = self.target_critic(states).squeeze(-1)
         
         # Normalize rewards
-        rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
+        #rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
         
         lambda_returns = torch.zeros_like(rewards)
         last_lambda_return = values[-1]
@@ -171,11 +173,16 @@ class DreamerV2:
             for step in range(max_steps_per_episode):
                 action, _ = self.actor.sample(torch.FloatTensor(state).unsqueeze(0).to(self.device))
                 action = action.squeeze(0).cpu().detach().numpy()
-                next_state, reward, done, truncated, _ = env.step(action)
+                if self.is_continous:
+                    next_state, reward, done, truncated, _ = env.step(action)
+                else:
+                    next_state, reward, done, truncated, _ = env.step(np.argmax(action))
 
                 if done or truncated:
                     break
 
+                if reward > 0:
+                    reward = -reward
                 self.replay_buffer.push(state, action, reward, next_state, done)
 
                 if len(self.replay_buffer) > self.batch_size:
@@ -213,11 +220,12 @@ class DreamerV2:
         self.writer.close()
 
 # Usage
-env = gym.make('Pendulum-v1')
+env = gym.make('CartPole-v1')
 state_dim = env.observation_space.shape[0]
-action_dim = env.action_space.shape[0]
+is_continous = False if isinstance(env.action_space, gym.spaces.Discrete) else True
+action_dim = env.action_space.n if isinstance(env.action_space, gym.spaces.Discrete) else env.action_space.shape[0]
 rnn_hidden_dim = 256
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-dreamer = DreamerV2(state_dim, action_dim, rnn_hidden_dim, device)
+dreamer = DreamerV2(state_dim, action_dim, rnn_hidden_dim, device, is_continous=is_continous)
 dreamer.train(env, num_episodes=1000, max_steps_per_episode=200)
