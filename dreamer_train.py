@@ -26,7 +26,7 @@ class DreamerV2:
         self.target_critic.load_state_dict(self.critic.state_dict())
 
         self.world_model_optimizer = torch.optim.Adam(self.world_model.parameters(), lr=1e-3)
-        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-4)
+        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-5)
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=1e-5)
 
         self.replay_buffer = ReplayBuffer(100000)
@@ -36,18 +36,18 @@ class DreamerV2:
         self.gamma = 0.99
         self.tau = 0.001
         self.lambda_value = 0.95
-        self.rho = 0.9
+        self.rho = 0.5
         self.eta = 0.01
-        self.imagine_horizon = 35
+        self.imagine_horizon = 50
         self.entropy_coef = 0.01
 
         self.writer = SummaryWriter()
 
     def update_world_model(self, states, actions, rewards, next_states):
-        states = torch.FloatTensor(states).to(self.device)
-        actions = torch.FloatTensor(actions).to(self.device)
+        states = torch.FloatTensor(np.array(states)).to(self.device)
+        actions = torch.FloatTensor(np.array(actions)).to(self.device)
         rewards = torch.FloatTensor(rewards).unsqueeze(1).to(self.device)
-        next_states = torch.FloatTensor(next_states).to(self.device)
+        next_states = torch.FloatTensor(np.array(next_states)).to(self.device)
 
         hidden = torch.zeros(states.size(0), self.world_model.rssm.rnn_hidden_dim).to(self.device)
        
@@ -89,12 +89,12 @@ class DreamerV2:
     def compute_lambda_returns(self, rewards, states):
         # Use target network for value estimation
         with torch.no_grad():
-            values = self.target_critic(states).squeeze(-1)
+            values = self.target_critic(states).squeeze(-1).to(self.device)
         
         # Normalize rewards
         #rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
         
-        lambda_returns = torch.zeros_like(rewards)
+        lambda_returns = torch.zeros_like(rewards).to(self.device)
         last_lambda_return = values[-1]
 
         for t in reversed(range(len(rewards))):
@@ -109,7 +109,7 @@ class DreamerV2:
         return lambda_returns.view(-1)
 
     def update_critic(self, imagined_states, imagined_rewards):
-        values = self.critic(imagined_states[:-1]).squeeze(-1)
+        values = self.critic(imagined_states[:-1]).squeeze(-1).to(self.device)
         
         lambda_returns = self.compute_lambda_returns(imagined_rewards, imagined_states)
         
@@ -129,7 +129,7 @@ class DreamerV2:
     def update_actor(self, imagined_states, imagined_rewards, log_probs):
         # Compute values and lambda returns
         with torch.no_grad():
-            values = self.critic(imagined_states[:-1]).squeeze(-1)
+            values = self.critic(imagined_states[:-1]).squeeze(-1).to(self.device)
             lambda_returns = self.compute_lambda_returns(imagined_rewards, imagined_states[:-1])
 
         # Compute advantages
@@ -137,6 +137,7 @@ class DreamerV2:
 
         # Normalize advantages
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        advantages = torch.clamp(advantages, -1, 1)
 
         # Reinforce term
         reinforce_loss = -self.rho * (log_probs * advantages.detach()).mean()
@@ -154,7 +155,7 @@ class DreamerV2:
         # Optimize the actor
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
+        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
         self.actor_optimizer.step()
 
         return actor_loss.item(), entropy.item()
@@ -226,6 +227,9 @@ is_continous = False if isinstance(env.action_space, gym.spaces.Discrete) else T
 action_dim = env.action_space.n if isinstance(env.action_space, gym.spaces.Discrete) else env.action_space.shape[0]
 rnn_hidden_dim = 256
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
+
+device = torch.device("cpu")
+print(f"Using device: {device}")
 dreamer = DreamerV2(state_dim, action_dim, rnn_hidden_dim, device, is_continous=is_continous)
 dreamer.train(env, num_episodes=1000, max_steps_per_episode=200)
