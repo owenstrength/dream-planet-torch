@@ -20,6 +20,7 @@ class DreamerV2:
         self.is_continous = is_continous
 
         self.world_model = WorldModel(state_dim, action_dim, rnn_hidden_dim).to(device)
+        self.world_model.load_state_dict(torch.load('./models/world_model.pth'))
         self.actor = Actor(state_dim, action_dim).to(device)
         self.critic = Critic(state_dim).to(device)
         self.target_critic = Critic(state_dim).to(device)
@@ -36,9 +37,9 @@ class DreamerV2:
         self.gamma = 0.99
         self.tau = 0.001
         self.lambda_value = 0.95
-        self.rho = 0.5
+        self.rho = 1.0
         self.eta = 0.01
-        self.imagine_horizon = 50
+        self.imagine_horizon = 15
         self.entropy_coef = 0.01
 
         self.writer = SummaryWriter()
@@ -182,26 +183,53 @@ class DreamerV2:
                 if done or truncated:
                     break
 
-                if reward > 0:
-                    reward = -reward
+                # going based on state, and next_state is not going to work
+                # we need to predict the future states, their rewards, based on the previous actions
+
+                # previous sequence
+                # for i in event horizon:
+                #   predict next state
+                #   previous sequence += next state
+                #   based on this, update dones
+                #   if we think we are done stop:
+                # 
+
+                # so as we are updating our world model, we need to figure what is going to cause us to
+                # be done, this is WAY more important than predicting the future reward,
+                # for an enviorment like metasumo this should work, but when the reward is based on if we 
+                # are done or not, we need to predict the likleyhood of being done AND the reward
+                
+                # this will make it more robust and we can include this stopping logic in our 
+                # imagine trajectories function
+
+                # the model may see that the reward stays the same everytime, and it does nothing.
+                # if we change the reward to be porpotionate to the length of the previous sequence,
+                # then the model should learn that when done, we lose, and we can get higher if we
+                # try not to be done, but that all starts with know what will cause us to be done,
+                # so we must look in the future and pick the best one
+
+
                 self.replay_buffer.push(state, action, reward, next_state, done)
 
                 if len(self.replay_buffer) > self.batch_size:
-                    batch = self.replay_buffer.sample(self.batch_size)
+                    # not sure if we want a random sample or not, we want to sample an entire sequence because
+                    # the states rely on each other
+                    batch = self.replay_buffer.sample(self.batch_size) 
                     batch_states, batch_actions, batch_rewards, batch_next_states, _ = zip(*batch)
 
                     world_model_loss, state_loss, reward_loss = self.update_world_model(
-                        batch_states, batch_actions, batch_rewards, batch_next_states)
+                        batch_states, batch_actions, batch_rewards, batch_next_states) # need to also predict discount
                    
-                    imagined_states, imagined_rewards, actions, log_probs = self.imagine_trajectories(state, hidden)
+                    imagined_states, imagined_rewards, actions, log_probs = self.imagine_trajectories(state, hidden) # use discounted values here
                     imagined_states = imagined_states.detach()
                     imagined_rewards = imagined_rewards.detach()
                     actor_loss, entropy = self.update_actor(imagined_states, imagined_rewards, log_probs)
-                    critic_loss = self.update_critic(imagined_states, imagined_rewards)
+                    critic_loss = self.update_critic(imagined_states, imagined_rewards) # use the discounted values here
 
                     self.writer.add_scalar('Loss/World_Model', world_model_loss, episode * max_steps_per_episode + step)
                     self.writer.add_scalar('Loss/State_Prediction', state_loss, episode * max_steps_per_episode + step)
                     self.writer.add_scalar('Loss/Reward_Prediction', reward_loss, episode * max_steps_per_episode + step)
+                    # write the discounted loss here
                     self.writer.add_scalar('Loss/Actor', actor_loss, episode * max_steps_per_episode + step)
                     self.writer.add_scalar('Loss/Critic', critic_loss, episode * max_steps_per_episode + step)
                     self.writer.add_scalar('Entropy', entropy, episode * max_steps_per_episode + step)
