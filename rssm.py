@@ -14,6 +14,8 @@ class RSSM(nn.Module):
         self.decoder = nn.Linear(rnn_hidden_dim, state_dim)
 
     def forward(self, state, action, hidden):
+        if action is None:
+            action = torch.zeros(state.size(0), self.action_dim).to(state.device)
         x = torch.cat([state, action], dim=-1)
         x = F.relu(self.encoder(x))
         hidden = self.rnn(x, hidden)

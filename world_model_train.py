@@ -7,7 +7,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 
 from world_model import WorldModel
-from replay_buffer import ReplayBuffer
+from replay_buffer import SequenceReplayBuffer
 
 torch.autograd.set_detect_anomaly(True)
 
@@ -21,10 +21,10 @@ class DreamerV2:
 
         self.world_model_optimizer = torch.optim.Adam(self.world_model.parameters(), lr=1e-3)
 
-        self.replay_buffer = ReplayBuffer(100000)
+        self.replay_buffer = SequenceReplayBuffer(100000, 500)
 
         # Hyperparameters
-        self.batch_size = 64
+        self.batch_size = 1
         self.gamma = 0.99
         self.tau = 0.001
         self.lambda_value = 0.95
@@ -35,26 +35,28 @@ class DreamerV2:
 
         self.writer = SummaryWriter()
 
-    def update_world_model(self, states, actions, rewards, next_states):
+    def update_world_model(self, states, actions, rewards, next_states, dones):
         states = torch.FloatTensor(np.array(states)).to(self.device)
         actions = torch.FloatTensor(np.array(actions)).to(self.device)
         rewards = torch.FloatTensor(rewards).unsqueeze(1).to(self.device)
         next_states = torch.FloatTensor(np.array(next_states)).to(self.device)
+        dones = torch.FloatTensor(dones).unsqueeze(1).to(self.device)
 
         hidden = torch.zeros(states.size(0), self.world_model.rssm.rnn_hidden_dim).to(self.device)
-       
-        state_preds, reward_preds, _ = self.world_model(states, actions, hidden)
-       
+    
+        state_preds, reward_preds, done_preds, _ = self.world_model(states, actions, hidden)
+    
         state_loss = F.mse_loss(state_preds, next_states)
         reward_loss = F.mse_loss(reward_preds, rewards)
-       
-        total_loss = state_loss + reward_loss
+        done_loss = F.binary_cross_entropy(done_preds, dones)
+    
+        total_loss = state_loss + reward_loss + done_loss
 
         self.world_model_optimizer.zero_grad()
         total_loss.backward()
         self.world_model_optimizer.step()
 
-        return total_loss.item(), state_loss.item(), reward_loss.item()
+        return total_loss.item(), state_loss.item(), reward_loss.item(), done_loss.item()
 
 
     def train(self, env, num_episodes, max_steps_per_episode=200):
@@ -78,14 +80,14 @@ class DreamerV2:
 
                 if reward > 0:
                     reward = -reward
-                self.replay_buffer.push(state, action, reward, next_state, done)
+                self.replay_buffer.push(state, action, reward, next_state, done, episode)
 
                 if len(self.replay_buffer) > self.batch_size:
                     batch = self.replay_buffer.sample(self.batch_size)
-                    batch_states, batch_actions, batch_rewards, batch_next_states, _ = zip(*batch)
+                    batch_states, batch_actions, batch_rewards, batch_next_states, batch_dones = batch
 
-                    world_model_loss, state_loss, reward_loss = self.update_world_model(
-                        batch_states, batch_actions, batch_rewards, batch_next_states)
+                    world_model_loss, state_loss, reward_loss, done_loss = self.update_world_model(
+                        batch_states[0], batch_actions[0], batch_rewards[0], batch_next_states[0], batch_dones[0])
 
                     self.writer.add_scalar('Loss/World_Model', world_model_loss, episode * max_steps_per_episode + step)
                     self.writer.add_scalar('Loss/State_Prediction', state_loss, episode * max_steps_per_episode + step)
